@@ -113,4 +113,103 @@ public class DepthCamera : MonoBehaviour
         return m_PointCloud;
     }
 
+    private Texture2D m_Depth;
+
+    private void CopyTargetTexture()
+    {
+        var tmp = RenderTexture.GetTemporary(m_Camera.targetTexture.width, m_Camera.targetTexture.height);
+        Graphics.Blit(m_Camera.targetTexture, tmp);
+        RenderTexture prev = RenderTexture.active;
+        RenderTexture.active = tmp;
+
+        if (m_Depth == null)
+            m_Depth = new Texture2D(tmp.width, tmp.height, TextureFormat.RGBAFloat, false);
+        m_Depth.ReadPixels(new Rect(0, 0, m_Depth.width, m_Depth.height), 0, 0);
+        m_Depth.Apply();
+
+        RenderTexture.active = prev;
+        RenderTexture.ReleaseTemporary(tmp);
+    }
+
+    // Why Not Correct ??
+    public Vector3[] GetPointCloud_CPU()
+    {
+        CopyTargetTexture();
+
+        if (!m_Depth) return null;
+
+        Vector3[] pointCloud = new Vector3[m_Depth.height * m_Depth.width];
+
+        for (int j = 0; j < m_Depth.height; j++)
+            for (int i = 0; i < m_Depth.width; i++)
+            {
+                float z = m_Depth.GetPixel(i, j).r;
+                if (z == 1 || z == 0) continue;
+
+                // Important!! if UNITY_REVERSED_Z
+                z = 1 - z;
+
+                Vector3 camPos = m_Camera.transform.position;
+                Vector3 camFar = m_Camera.ScreenToWorldPoint(new Vector3(i, j, m_Camera.farClipPlane));
+                Vector3 p = Vector3.Lerp(camPos, camFar, Linear01Depth(z, GetZBufferParams(m_Camera)));
+
+                pointCloud[j * m_Depth.width + i] = p;
+            }
+        return pointCloud;
+    }
+
+    public Vector3[] GetNormals_CPU()
+    {
+        CopyTargetTexture();
+
+        if (!m_Depth) return null;
+
+        Vector3[] normals = new Vector3[m_Depth.height * m_Depth.width];
+
+        for (int j = 1; j < m_Depth.height - 1; j++)
+            for (int i = 1; i < m_Depth.width - 1; i++)
+            {
+                //dzdx = (z(x + 1, y) - z(x - 1, y)) / 2.0;
+                //dzdy = (z(x, y + 1) - z(x, y - 1)) / 2.0;
+                //direction = (-dzdx, -dzdy, 1.0)
+                //magnitude = sqrt(direction.x * *2 + direction.y * *2 + direction.z * *2)
+                //normal = direction / magnitude
+
+                float dzdx = (m_Depth.GetPixel(i - 1, j).r - m_Depth.GetPixel(i + 1, j).r) / 2.0f;
+                float dzdy = (m_Depth.GetPixel(i, j - 1).r - m_Depth.GetPixel(i, j + 1).r) / 2.0f;
+                Vector3 normal = new Vector3(-dzdx, -dzdy, 1.0f);
+                normal.Normalize();
+                normals[j * m_Depth.width + i] = m_Camera.transform.localRotation * normal * -1;
+            }
+        return normals;
+    }
+
+    #region Camera Function
+
+    // Z buffer to linear 0..1 depth (0 at eye, 1 at far plane)
+    public static Vector4 GetZBufferParams(Camera cam)
+    {
+        float zc0, zc1;
+        // OpenGL would be this:
+        //zc0 = (1.0f - m_Camera.farClipPlane / m_Camera.nearClipPlane) / 2.0f;
+        //zc1 = (1.0f + m_Camera.farClipPlane / m_Camera.nearClipPlane) / 2.0f;
+        // D3D is this:
+        zc0 = 1.0f - cam.farClipPlane / cam.nearClipPlane;
+        zc1 = cam.farClipPlane / cam.nearClipPlane;
+        return new Vector4(zc0, zc1, zc0 / cam.farClipPlane, zc1 / cam.farClipPlane);
+    }
+
+    // Z buffer to linear 0..1 depth (0 at eye, 1 at far plane)
+    public static float Linear01Depth(float z, Vector4 zBufferParams)
+    {
+        return 1.0f / (zBufferParams.x * z + zBufferParams.y);
+    }
+
+    // Z buffer to linear depth
+    public static float LinearEyeDepth(float z, Vector4 zBufferParams)
+    {
+        return 1.0f / (zBufferParams.z * z + zBufferParams.w);
+    }
+
+    #endregion
 }
